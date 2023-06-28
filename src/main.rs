@@ -1,19 +1,23 @@
 use std::{collections::VecDeque, ops::Range};
 
-use petgraph::prelude::UnGraph;
+use petgraph::{graph::NodeIndex, prelude::UnGraph, Graph};
 use piston_window::{PistonWindow, WindowSettings};
 use plotters::prelude::*;
 use plotters_piston::{draw_piston_window, PistonBackend};
 use rand::Rng;
 
+/// i know, i know, this is a terrible way to do this
 fn sample_range_with_resampling(points: &VecDeque<(i32, i32)>, range: Range<i32>) -> (i32, i32) {
     let mut rng = rand::thread_rng();
-    loop {
+    'outer: loop {
         let random_x = rng.gen_range(range.clone());
         let random_y = rng.gen_range(range.clone());
-        if !points.contains(&(random_x, random_y)) {
-            return (random_x, random_y);
+        for (x, y) in points.iter() {
+            if (x - random_x).abs() < 40 && (y - random_y).abs() < 40 {
+                continue 'outer;
+            }
         }
+        return (random_x, random_y);
     }
 }
 
@@ -22,9 +26,10 @@ struct NodeData {
     x: i32,
     y: i32,
 }
-#[derive(Debug, Copy, Clone)]
+#[derive(Debug, Copy, Clone, Default)]
 struct EdgeData {
     dist: f64,
+    pheromone: f64,
 }
 
 fn is_fully_connected(graph: &UnGraph<NodeData, EdgeData>) -> bool {
@@ -38,7 +43,8 @@ fn is_fully_connected(graph: &UnGraph<NodeData, EdgeData>) -> bool {
     true
 }
 
-fn initialize_graph(graph: &mut UnGraph<NodeData, EdgeData>, points: &VecDeque<(i32, i32)>) {
+fn initialize_graph(points: &VecDeque<(i32, i32)>) -> UnGraph<NodeData, EdgeData> {
+    let mut graph = Graph::new_undirected();
     let mut node_map = std::collections::HashMap::new();
     for (x, y) in points.iter() {
         let node = graph.add_node(NodeData { x: *x, y: *y });
@@ -52,21 +58,41 @@ fn initialize_graph(graph: &mut UnGraph<NodeData, EdgeData>, points: &VecDeque<(
                 graph.add_edge(
                     *node_map.get(&(x1, y1)).unwrap(),
                     *node_map.get(&(x2, y2)).unwrap(),
-                    EdgeData { dist },
+                    EdgeData {
+                        dist,
+                        ..Default::default()
+                    },
                 );
             }
         }
     }
-    assert!(is_fully_connected(graph)); // making sure that the graph is fully connected
+    assert!(is_fully_connected(&graph)); // making sure that the graph is fully connected
+    graph
 }
 
-const FPS: u32 = 10;
-const MAX_POINTS: usize = 30;
+const FPS: u32 = 30;
+const MAX_POINTS: usize = 100;
 const WINDOW_TITLE: &str = "Traveling Salesman Problem";
 
+#[derive(Debug, Clone, Default)]
+struct Ant {
+    path: Vec<NodeIndex>,
+}
+
+#[derive(Debug)]
+struct ACO {
+    graph: UnGraph<NodeData, EdgeData>,
+    start_node: NodeIndex,
+    alpha: f64,
+    beta: f64,
+    ants: Vec<Ant>,
+}
+
+#[derive(Debug)]
 enum State {
     Populating,
-    MakingPath,
+    InitGraph,
+    MakingPath(ACO),
 }
 
 fn main() {
@@ -75,7 +101,6 @@ fn main() {
         .build()
         .unwrap();
     let mut points = VecDeque::new();
-    let mut graph = petgraph::Graph::new_undirected();
     let mut state = State::Populating;
     let mut f = |b: PistonBackend| {
         let root = b.into_drawing_area();
@@ -95,14 +120,30 @@ fn main() {
                 let coord = sample_range_with_resampling(&points, range);
                 points.push_front(coord);
                 if points.len() == MAX_POINTS {
-                    state = State::MakingPath;
-                    initialize_graph(&mut graph, &points);
+                    state = State::InitGraph;
                 }
             }
-            State::MakingPath => {}
+            State::InitGraph => {
+                let graph = initialize_graph(&points);
+                // randomly pick a node to start with
+                let mut rng = rand::thread_rng();
+                let start_node = graph
+                    .node_indices()
+                    .nth(rng.gen_range(0..graph.node_count()))
+                    .unwrap();
+                let aco = ACO {
+                    graph,
+                    start_node,
+                    alpha: 1.0,
+                    beta: 1.0,
+                    ants: vec![Ant::default(); 10],
+                };
+                state = State::MakingPath(aco);
+            }
+            State::MakingPath(aco) => {}
         }
 
-        cc.draw_series(points.iter().map(|(x, y)| Circle::new((*x, *y), 15, RED)))
+        cc.draw_series(points.iter().map(|(x, y)| Circle::new((*x, *y), 10, RED)))
             .unwrap();
 
         std::thread::sleep(std::time::Duration::from_millis(1000 / FPS as u64));
