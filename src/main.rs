@@ -79,10 +79,21 @@ struct Ant {
     path: Vec<NodeIndex>,
 }
 
+impl Ant {
+    fn new(start_node: NodeIndex) -> Self {
+        Self {
+            path: vec![start_node],
+        }
+    }
+
+    fn advance(&mut self, graph: &UnGraph<NodeData, EdgeData>) {
+        todo!()
+    }
+}
+
 #[derive(Debug)]
 struct ACO {
     graph: UnGraph<NodeData, EdgeData>,
-    start_node: NodeIndex,
     alpha: f64,
     beta: f64,
     ants: Vec<Ant>,
@@ -133,11 +144,11 @@ fn main() {
                     .unwrap();
                 let aco = ACO {
                     graph,
-                    start_node,
                     alpha: 1.0,
                     beta: 1.0,
-                    ants: vec![Ant::default(); 10],
+                    ants: vec![Ant::new(start_node); 10],
                 };
+                println!("{:?}", aco.ants);
                 state = State::MakingPath(aco);
             }
             State::MakingPath(aco) => {}
