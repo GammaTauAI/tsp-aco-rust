@@ -3,6 +3,8 @@ use std::{
     ops::Range,
 };
 
+use clap::Parser;
+use lazy_static::lazy_static;
 use petgraph::{graph::NodeIndex, prelude::UnGraph, Graph};
 use piston_window::{PistonWindow, WindowSettings};
 use plotters::prelude::*;
@@ -16,6 +18,30 @@ macro_rules! debug {
             println!($($arg)*);
         }
     };
+}
+
+#[derive(Parser)]
+struct Args {
+    #[clap(short, long, default_value = "60")]
+    fps: u32,
+    #[clap(short, long, default_value = "50")]
+    epochs: usize,
+    #[clap(short, long, default_value = "20")]
+    points: usize,
+    #[clap(short, long, default_value = "3")]
+    ants: usize,
+    #[clap(long, default_value = "1.0")]
+    alpha: f64,
+    #[clap(long, default_value = "1.0")]
+    beta: f64,
+    #[clap(long, default_value = "0.5")]
+    eva: f64,
+    #[clap(long, default_value = "1")]
+    q: f64,
+    #[clap(short, long, default_value_t = false)]
+    instant_epoch: bool,
+    #[clap(long, default_value = "shortest")]
+    retrieval: String,
 }
 
 /// i know, i know, this is a terrible way to do this
@@ -82,15 +108,16 @@ fn initialize_graph(points: &VecDeque<(i32, i32)>) -> UnGraph<NodeData, EdgeData
     graph
 }
 
-const FPS: u32 = 120;
-const MAX_POINTS: usize = 15;
+lazy_static! {
+    static ref ARGS: Args = Args::parse();
+}
+
 const WINDOW_TITLE: &str = "Traveling Salesman Problem";
-const NUM_ANTS: usize = 5;
-const EPOCHS: usize = 30;
 
 #[derive(Debug, Clone, Default)]
 struct Ant {
     path: Vec<NodeIndex>,
+    path_length: f64,
     visited: HashSet<NodeIndex>,
     iter: usize,
 }
@@ -99,6 +126,7 @@ impl Ant {
     fn new(start_node: NodeIndex) -> Self {
         Self {
             path: vec![start_node],
+            path_length: 0.0,
             visited: HashSet::from([start_node]),
             iter: 0,
         }
@@ -133,6 +161,7 @@ impl Ant {
                 edge_data.pheromone
             };
             let wei = pheromone.powf(params.alpha) * (1.0 / edge_data.dist).powf(params.beta);
+            debug!("wei: {}", wei);
             weis.insert(neighbor, wei);
             wei_sum += wei;
         }
@@ -148,6 +177,10 @@ impl Ant {
         let dist = WeightedIndex::new(&probs).unwrap();
         let pick = dist.sample(&mut rng);
         let next_node = neighbors[pick];
+        self.path_length += graph
+            .edge_weight(graph.find_edge(*current_node, next_node).unwrap())
+            .unwrap()
+            .dist;
         debug!("pick {}: {}", probs[pick], pick);
         self.path.push(next_node);
         self.visited.insert(next_node);
@@ -162,13 +195,14 @@ impl Ant {
             let next_node = self.path[i + 1];
             let edge = graph.find_edge(*node, next_node).unwrap();
             let edge_data = graph.edge_weight_mut(edge).unwrap();
-            edge_data.pheromone += 1.0 / edge_data.dist;
+            edge_data.pheromone += ARGS.q / self.path_length;
         }
     }
 
     fn next_iter(&mut self) {
         let start = self.path[0];
         self.path = vec![start];
+        self.path_length = 0.0;
         self.visited = HashSet::from([start]);
         self.iter += 1;
     }
@@ -190,7 +224,7 @@ struct ACOState {
 
 impl ACOState {
     fn advance_ants(&mut self) -> (Vec<(&NodeData, &NodeData)>, bool) {
-        assert!(!self.ants.is_empty());
+        // TODO: make this parallel
         let start_node = self.ants[0].path[0];
         let mut advancements = Vec::new();
         let mut is_finished = false;
@@ -209,13 +243,13 @@ impl ACOState {
     }
 
     fn update_pheromones(&mut self) {
-        for ant in &mut self.ants {
-            ant.deposit_pheromones(&mut self.graph);
-            ant.next_iter();
-        }
         for edge in self.graph.edge_indices() {
             let edge_data = self.graph.edge_weight_mut(edge).unwrap();
             edge_data.pheromone *= self.params.eva;
+        }
+        for ant in &mut self.ants {
+            ant.deposit_pheromones(&mut self.graph);
+            ant.next_iter();
         }
     }
 
@@ -247,6 +281,24 @@ impl ACOState {
         path_data.push(start_data);
         (path_data, total_dist)
     }
+
+    fn shortest_path(&self) -> (Vec<&NodeData>, f64) {
+        let mut shortest_path = None;
+        let mut shortest_dist = f64::INFINITY;
+        for ant in &self.ants {
+            let dist = ant.path_length;
+            if dist < shortest_dist {
+                shortest_dist = dist;
+                shortest_path = Some(
+                    ant.path
+                        .iter()
+                        .map(|n| self.graph.node_weight(*n).unwrap())
+                        .collect::<Vec<_>>(),
+                );
+            }
+        }
+        (shortest_path.unwrap(), shortest_dist)
+    }
 }
 
 #[derive(Debug)]
@@ -261,11 +313,16 @@ enum State {
 }
 
 fn main() {
+    assert!(ARGS.ants > 0);
+    assert!(ARGS.epochs > 0);
+    assert!(ARGS.alpha > 0.0);
+    assert!(ARGS.beta >= 1.0);
     let mut window: PistonWindow = WindowSettings::new(WINDOW_TITLE, [1100, 1100])
         .samples(4)
         .build()
         .unwrap();
-    let ant_colors = (0..NUM_ANTS).map(Palette99::pick).collect::<Vec<_>>();
+
+    let ant_colors = (0..ARGS.ants).map(Palette99::pick).collect::<Vec<_>>();
     let mut points = VecDeque::new();
     let mut edge_lines = VecDeque::new();
     let mut dists_collect = Vec::new();
@@ -283,7 +340,7 @@ fn main() {
             let i_i32 = i as i32;
             let (x1, y1) = (from.x + i_i32, from.y + i_i32);
             let (x2, y2) = (to.x + i_i32, to.y + i_i32);
-            edge_lines.push_front((&ant_colors[i], (x1, y1), (x2, y2)));
+            edge_lines.push_back((&ant_colors[i], (x1, y1), (x2, y2)));
         };
 
         let mut cc = ChartBuilder::on(&root)
@@ -301,27 +358,22 @@ fn main() {
             State::PointsGen => {
                 let range = -500..501;
                 let coord = sample_range_with_resampling(&points, range);
-                points.push_front(coord);
-                if points.len() == MAX_POINTS {
+                points.push_back(coord);
+                if points.len() == ARGS.points {
                     state = State::InitGraph;
                 }
             }
             State::InitGraph => {
                 let graph = initialize_graph(&points);
-                // randomly pick a node to start with
-                let mut rng = rand::thread_rng();
-                let start_node = graph
-                    .node_indices()
-                    .nth(rng.gen_range(0..graph.node_count()))
-                    .unwrap();
+                let start_node = graph.node_indices().next().unwrap();
                 aco = Some(ACOState {
                     graph,
                     params: ACOParams {
-                        alpha: 1.0,
-                        beta: 1.0,
-                        eva: 0.5,
+                        alpha: ARGS.alpha,
+                        beta: ARGS.beta,
+                        eva: ARGS.eva,
                     },
-                    ants: vec![Ant::new(start_node); NUM_ANTS],
+                    ants: vec![Ant::new(start_node); ARGS.ants],
                 });
                 state = State::Advancing;
             }
@@ -330,7 +382,7 @@ fn main() {
                 let (advancements, is_finished) = aco.advance_ants();
                 debug!("finished: {}", is_finished);
                 if is_finished {
-                    if epoch != EPOCHS {
+                    if epoch != ARGS.epochs {
                         state = State::PheroUpdate;
                         epoch += 1;
                     } else {
@@ -342,7 +394,10 @@ fn main() {
                     .enumerate()
                     .for_each(|(i, (from, to))| {
                         add_line(i, from, to);
-                    })
+                    });
+                if ARGS.instant_epoch {
+                    return Ok(());
+                }
             }
             State::PheroUpdate => {
                 debug!("updating pheromones");
@@ -351,16 +406,25 @@ fn main() {
                 state = State::NextIter;
             }
             State::NextIter => {
+                if ARGS.instant_epoch {
+                    std::thread::sleep(std::time::Duration::from_millis(250));
+                }
                 edge_lines.clear();
                 state = State::Advancing;
             }
             State::Done => {
-                let (path, total_dist) = aco.as_ref().unwrap().most_common_path();
+                let aco = aco.as_ref().unwrap();
+                let (path, total_dist) = match ARGS.retrieval.as_str() {
+                    "common" => aco.most_common_path(),
+                    "shortest" => aco.shortest_path(),
+                    _ => panic!("invalid retrieval method"),
+                };
                 dists_collect.push(total_dist);
-                debug!("total dist: {}", total_dist);
-                debug!("dists: {:?}", dists_collect);
-                debug!("path: {:?}", path);
-                let yellow_marker = RGBAColor(255, 255, 0, 0.5).stroke_width(10);
+                println!("total dist: {}", total_dist);
+                println!("dists: {:?}", dists_collect);
+                println!("path: {:?}", path);
+                // https://www.colourlovers.com/color/E4FC5B/yellow_marker
+                let yellow_marker = RGBAColor(228, 252, 91, 0.75).stroke_width(10);
                 cc.draw_series(path.iter().take(path.len()).zip(path.iter().skip(1)).map(
                     |(from, to)| {
                         let xy1 = (from.x - 1, from.y - 1);
@@ -373,6 +437,7 @@ fn main() {
             }
             State::Sleep => {
                 // wait for input
+                println!("Press enter to retry the same problem");
                 std::io::stdin().read_line(&mut String::new()).unwrap();
                 state = State::InitGraph;
                 epoch = 0;
@@ -393,7 +458,7 @@ fn main() {
         }))
         .unwrap();
 
-        std::thread::sleep(std::time::Duration::from_millis(1000 / FPS as u64));
+        std::thread::sleep(std::time::Duration::from_millis(1000 / ARGS.fps as u64));
         Ok(())
     };
     while draw_piston_window(&mut window, &mut f).is_some() {}
