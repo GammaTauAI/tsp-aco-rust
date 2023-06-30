@@ -114,7 +114,7 @@ lazy_static! {
 
 const WINDOW_TITLE: &str = "Traveling Salesman Problem";
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 struct Ant {
     path: Vec<NodeIndex>,
     path_length: f64,
@@ -224,7 +224,6 @@ struct ACOState {
 
 impl ACOState {
     fn advance_ants(&mut self) -> (Vec<(&NodeData, &NodeData)>, bool) {
-        // TODO: make this parallel
         let start_node = self.ants[0].path[0];
         let mut advancements = Vec::new();
         let mut is_finished = false;
@@ -317,6 +316,7 @@ fn main() {
     assert!(ARGS.epochs > 0);
     assert!(ARGS.alpha > 0.0);
     assert!(ARGS.beta >= 1.0);
+
     let mut window: PistonWindow = WindowSettings::new(WINDOW_TITLE, [1100, 1100])
         .samples(4)
         .build()
@@ -375,28 +375,32 @@ fn main() {
                     },
                     ants: vec![Ant::new(start_node); ARGS.ants],
                 });
+
                 state = State::Advancing;
             }
             State::Advancing => {
                 let aco = aco.as_mut().unwrap();
-                let (advancements, is_finished) = aco.advance_ants();
-                debug!("finished: {}", is_finished);
-                if is_finished {
-                    if epoch != ARGS.epochs {
-                        state = State::PheroUpdate;
-                        epoch += 1;
-                    } else {
-                        state = State::Done;
+                loop {
+                    let (advancements, is_finished) = aco.advance_ants();
+                    debug!("finished: {}", is_finished);
+                    advancements
+                        .into_iter()
+                        .enumerate()
+                        .for_each(|(i, (from, to))| {
+                            add_line(i, from, to);
+                        });
+                    if is_finished {
+                        if epoch != ARGS.epochs {
+                            state = State::PheroUpdate;
+                            epoch += 1;
+                        } else {
+                            state = State::Done;
+                        }
+                        break;
                     }
-                }
-                advancements
-                    .into_iter()
-                    .enumerate()
-                    .for_each(|(i, (from, to))| {
-                        add_line(i, from, to);
-                    });
-                if ARGS.instant_epoch {
-                    return Ok(());
+                    if !ARGS.instant_epoch {
+                        break;
+                    }
                 }
             }
             State::PheroUpdate => {
@@ -406,9 +410,6 @@ fn main() {
                 state = State::NextIter;
             }
             State::NextIter => {
-                if ARGS.instant_epoch {
-                    std::thread::sleep(std::time::Duration::from_millis(250));
-                }
                 edge_lines.clear();
                 state = State::Advancing;
             }
@@ -453,10 +454,16 @@ fn main() {
         )
         .unwrap();
 
-        cc.draw_series(edge_lines.iter().map(|(color, (x1, y1), (x2, y2))| {
-            PathElement::new(vec![(*x1, *y1), (*x2, *y2)], color.stroke_width(2))
-        }))
-        .unwrap();
+        if ARGS.instant_epoch {
+            return Ok(());
+        }
+
+        if !matches!(state, State::Sleep) {
+            cc.draw_series(edge_lines.iter().map(|(color, (x1, y1), (x2, y2))| {
+                PathElement::new(vec![(*x1, *y1), (*x2, *y2)], color.stroke_width(2))
+            }))
+            .unwrap();
+        }
 
         std::thread::sleep(std::time::Duration::from_millis(1000 / ARGS.fps as u64));
         Ok(())
